@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "masc-metric"
+version = "0.1.0"
+description = "MaSC: a Masked Similarity Metric for evaluating concept-driven generation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Patryk Bartkowiak", email = "patryk.bartkowiak@amu.edu.pl" },
+]
+keywords = [
+    "evaluation",
+    "metric",
+    "personalization",
+    "text-to-image",
+    "diffusion",
+    "siglip",
+    "concept-preservation",
+    "prompt-following",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "transformers>=5.6",
+    "pillow>=9.0",
+    "numpy>=1.23",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "ruff>=0.5",
+    "build",
+    "twine",
+]
+
+[project.urls]
+Homepage = "https://masc-metric.github.io/"
+Repository = "https://github.com/masc-metric/masc"
+Issues = "https://github.com/masc-metric/masc/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/masc"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/masc",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+exclude = [
+    "examples",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
