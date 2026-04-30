@@ -13,5 +13,5 @@ Concept-Driven Generation".
 from .metric import MaSC, MaSCResult
 from .text import strip_subject_from_prompt
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = ["MaSC", "MaSCResult", "strip_subject_from_prompt", "__version__"]

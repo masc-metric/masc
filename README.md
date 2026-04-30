@@ -1,6 +1,10 @@
-# MaSC
+# MaSC: A Masked Similarity Metric for Evaluating Concept-Driven Generation
 
-**A Masked Similarity Metric for Evaluating Concept-Driven Generation.**
+[**Project page**](https://masc-metric.github.io/) ·
+[**GitHub**](https://github.com/masc-metric/masc) ·
+[**PyPI**](https://pypi.org/project/masc-metric/)
+
+![MaSC method diagram](https://raw.githubusercontent.com/masc-metric/masc/main/assets/method_diagram.png)
 
 MaSC is a non-LLM evaluation metric for single-concept text-to-image
 personalization. One forward pass of `google/siglip2-so400m-patch16-naflex`
@@ -81,14 +85,14 @@ Any SigLIP2 checkpoint works (fixed-size or NaFlex):
 masc = MaSC(model_id="google/siglip2-base-patch16-512")
 ```
 
+Smaller backbones are faster but lose accuracy. The paper's headline
+numbers are on `siglip2-so400m-patch16-naflex` at 1024 patches.
+
 ### Device
 
 By default MaSC auto-picks the best available torch device: CUDA →
 Apple MPS → CPU. Override with `device="cuda"`, `device="mps"`, or
 `device="cpu"` if you want to pin it.
-
-Smaller backbones are faster but lose accuracy. The paper's headline
-numbers are on `siglip2-so400m-patch16-naflex` at 1024 patches.
 
 ## Citation
 
@@ -97,11 +101,11 @@ If you use MaSC, please cite:
 ```bibtex
 @inproceedings{bartkowiak2026masc,
   title     = {{MaSC}: A Masked Similarity Metric for Evaluating Concept-Driven Generation},
-  author    = {Bartkowiak, Patryk},
+  author    = {Bartkowiak, Patryk and Petersen, Lennart and Pirk, S{\"o}ren and Pa{\l}ubicki, Wojtek},
   year      = {2026}
 }
 ```
 
 ## License
 
-Apache-2.0. See `LICENSE`.
+Apache-2.0. See [`LICENSE`](LICENSE).
