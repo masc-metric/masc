@@ -99,10 +99,11 @@ Apple MPS → CPU. Override with `device="cuda"`, `device="mps"`, or
 If you use MaSC, please cite:
 
 ```bibtex
-@inproceedings{bartkowiak2026masc,
-  title     = {{MaSC}: A Masked Similarity Metric for Evaluating Concept-Driven Generation},
-  author    = {Bartkowiak, Patryk and Petersen, Lennart and Pirk, S{\"o}ren and Pa{\l}ubicki, Wojtek},
-  year      = {2026}
+@article{bartkowiak2026masc,
+  title={MaSC: A Masked Similarity Metric for Evaluating Concept-Driven Generation},
+  author={Bartkowiak, Patryk and Petersen, Lennart and Kotrys, Bartosz and Michels, Dominik and Pirk, Soren and Palubicki, Wojtek},
+  journal={arXiv preprint arXiv:2605.22469},
+  year={2026}
 }
 ```
 

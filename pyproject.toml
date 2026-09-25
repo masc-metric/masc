@@ -13,6 +13,8 @@ license-files = ["LICENSE"]
 authors = [
     { name = "Patryk Bartkowiak", email = "patryk.bartkowiak@amu.edu.pl" },
     { name = "Lennart Petersen" },
+    { name = "Bartosz Kotrys" },
+    { name = "Dominik L. Michels" },
     { name = "Sören Pirk" },
     { name = "Wojtek Pałubicki" },
 ]
