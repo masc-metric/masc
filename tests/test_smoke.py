@@ -13,7 +13,7 @@ from masc import __version__
 
 
 def test_version():
-    assert __version__ == "0.1.1"
+    assert __version__ == "0.2.0"
 
 
 def test_strip_subject_with_article():

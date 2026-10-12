@@ -11,7 +11,14 @@ Reference: "MaSC: A Masked Similarity Metric for Evaluating
 Concept-Driven Generation".
 """
 from .metric import MaSC, MaSCResult
-from .text import strip_subject_from_prompt
+from .text import STRIPPERS, SpacySubjectStripper, strip_subject_from_prompt
 
-__version__ = "0.1.1"
-__all__ = ["MaSC", "MaSCResult", "strip_subject_from_prompt", "__version__"]
+__version__ = "0.2.0"
+__all__ = [
+    "STRIPPERS",
+    "MaSC",
+    "MaSCResult",
+    "SpacySubjectStripper",
+    "__version__",
+    "strip_subject_from_prompt",
+]

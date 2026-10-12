@@ -32,7 +32,7 @@ import torchvision.transforms.functional as TF
 from PIL import Image
 from transformers import AutoModel, AutoProcessor, AutoTokenizer
 
-from .text import strip_subject_from_prompt
+from .text import STRIPPERS, SpacySubjectStripper, strip_subject_from_prompt
 
 DEFAULT_MODEL_ID = "google/siglip2-so400m-patch16-naflex"
 DEFAULT_NAFLEX_MAX_PATCHES = 1024
@@ -85,6 +85,11 @@ class MaSC:
     dtype
         Optional torch dtype to cast the model to (e.g. `torch.bfloat16`).
         Default: keep the checkpoint's native dtype.
+    stripper
+        How `score(..., object_name=...)` removes the subject from the PF
+        prompt: `"regex"` (default; the paper's stripper), `"spacy"`
+        (syntax-aware; needs the `spacy` extra and `en_core_web_sm`, see
+        `masc.text.SpacySubjectStripper`), or `"none"` (keep the prompt).
     """
 
     def __init__(
@@ -94,7 +99,15 @@ class MaSC:
         naflex_max_patches: int = DEFAULT_NAFLEX_MAX_PATCHES,
         fg_threshold: float = DEFAULT_FG_THRESHOLD,
         dtype: Optional[torch.dtype] = None,
+        stripper: str = "regex",
     ) -> None:
+        if stripper not in STRIPPERS:
+            raise ValueError(f"stripper must be one of {STRIPPERS}, got {stripper!r}")
+        self.stripper = stripper
+        # Loading spaCy here fails before the backbone download, not mid-evaluation.
+        self.stripper_model = (
+            SpacySubjectStripper.load().model_name if stripper == "spacy" else None
+        )
         self.model_id = model_id
         self.device = device if device is not None else _auto_device()
         self.fg_threshold = float(fg_threshold)
@@ -143,18 +156,23 @@ class MaSC:
             The full prompt used to generate `out_image`.
         object_name
             Canonical subject name to strip from `prompt` before text
-            encoding (e.g. `"cat"`). If `None`, the prompt is used
-            as-is. Stripping is recommended — it is what produces the
-            PF lift over CLIP-T on the same backbone.
+            encoding (e.g. `"cat"`), with the constructor's `stripper`.
+            If `None`, the prompt is used as-is. Stripping is
+            recommended; the paper's PF numbers use it.
+
+        Returns
+        -------
+        MaSCResult
+            Its `extras` record the encoded text (`prompt_text`), whether
+            the subject was found and removed (`prompt_stripped`), the
+            `stripper` used and, for spaCy, its pipeline (`stripper_model`).
         """
         ref_patches, ref_fg, _ = self._encode_image(ref_image, ref_mask)
         out_patches, out_fg, _ = self._encode_image(out_image, out_mask)
 
         cp, cp_extras = self._concept_preservation(ref_patches, ref_fg, out_patches)
 
-        text_prompt = (
-            strip_subject_from_prompt(prompt, object_name) if object_name else prompt
-        )
+        text_prompt, strip_extras = self._pf_prompt(prompt, object_name)
         pf, pf_extras = self._prompt_following(out_image, out_mask, text_prompt)
 
         return MaSCResult(
@@ -162,11 +180,23 @@ class MaSC:
             pf=pf,
             extras={
                 "prompt_text": text_prompt,
-                "prompt_stripped": object_name is not None,
+                **strip_extras,
                 **cp_extras,
                 **pf_extras,
             },
         )
+
+    def _pf_prompt(self, prompt: str, object_name: Optional[str]) -> tuple[str, dict]:
+        """The text the PF head encodes, and how it was obtained."""
+        if not (object_name and object_name.strip()):
+            return prompt, {"prompt_stripped": False, "stripper": None, "stripper_model": None}
+        text = strip_subject_from_prompt(prompt, object_name, stripper=self.stripper)
+        return text, {
+            # Whitespace-insensitive: True only if the subject was found.
+            "prompt_stripped": text.split() != prompt.split(),
+            "stripper": self.stripper,
+            "stripper_model": self.stripper_model,
+        }
 
     # --------------- vision encoding ---------------
 

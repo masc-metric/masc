@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "masc-metric"
-version = "0.1.1"
+dynamic = ["version"]
 description = "MaSC: a Masked Similarity Metric for evaluating concept-driven generation"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -48,6 +48,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Syntax-aware subject stripper (`stripper="spacy"`). The English model is not
+# on PyPI: also run `python -m spacy download en_core_web_sm`.
+spacy = [
+    "spacy>=3.8,<4",
+]
 dev = [
     "pytest>=7",
     "ruff>=0.5",
@@ -59,6 +64,10 @@ dev = [
 Homepage = "https://masc-metric.github.io/"
 Repository = "https://github.com/masc-metric/masc"
 Issues = "https://github.com/masc-metric/masc/issues"
+Changelog = "https://github.com/masc-metric/masc/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/masc/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/masc"]
@@ -68,6 +77,7 @@ include = [
     "src/masc",
     "tests",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "pyproject.toml",
 ]
