@@ -6,7 +6,8 @@ Per (ref_image, out_image, prompt) call:
 2. One vision-tower forward on the output    → out patch tokens.
 3. One text-tower forward on the (subject-stripped) prompt.
 
-CP and PF both consume those tensors:
+CP and PF both consume those tensors; PF reuses the output's patch tokens,
+so no image is encoded twice:
 
 - CP = mean over fg-ref patches of max-cosine to any out patch
        (`masked_maxcos`), with masks downsampled to the patch grid and
@@ -28,9 +29,8 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torchvision.transforms.functional as TF
 from PIL import Image
-from transformers import AutoModel, AutoProcessor, AutoTokenizer
+from transformers import AutoModel, AutoProcessor
 
 from .text import STRIPPERS, SpacySubjectStripper, strip_subject_from_prompt
 
@@ -46,6 +46,28 @@ def _auto_device() -> str:
     if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+@dataclass
+class _Encoding:
+    """One image through the vision tower, kept in the layout the pooler needs."""
+
+    hidden: torch.Tensor
+    """Last hidden state `[1, N_max, D]`, padded positions included (NaFlex)."""
+
+    valid: torch.Tensor
+    """`[N_max]` bool: the positions that hold a real patch."""
+
+    grid: tuple[int, int]
+    """Patch grid `(Hp, Wp)`; `valid.sum() == Hp * Wp`."""
+
+    fg: torch.Tensor
+    """`[Hp * Wp]` mask weights in `[0, 1]` (float32), row-major over the grid."""
+
+    @property
+    def patches(self) -> torch.Tensor:
+        """`[Hp * Wp, D]` patch tokens (SigLIP2 has no CLS token)."""
+        return self.hidden[0][self.valid]
 
 
 @dataclass
@@ -81,7 +103,9 @@ class MaSC:
         checkpoints. Default 1024 (32x32 grid for square inputs).
     fg_threshold
         Threshold applied to the patch-grid-downsampled mask to decide
-        which patches are foreground. Default 0.5.
+        which patches are foreground. Default 0.5. As in the paper's code,
+        CP keeps the reference patches whose weight is above it and PF hides
+        the output patches whose weight is at or above it.
     dtype
         Optional torch dtype to cast the model to (e.g. `torch.bfloat16`).
         Default: keep the checkpoint's native dtype.
@@ -115,7 +139,6 @@ class MaSC:
         self.naflex_max_patches = int(naflex_max_patches)
 
         self.processor = AutoProcessor.from_pretrained(model_id)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
         model = AutoModel.from_pretrained(model_id)
         if dtype is not None:
             model = model.to(dtype=dtype)
@@ -123,8 +146,6 @@ class MaSC:
 
         vision_cfg = self.model.vision_model.config
         self.patch_size = int(vision_cfg.patch_size)
-        self.image_mean = list(self.processor.image_processor.image_mean)
-        self.image_std = list(self.processor.image_processor.image_std)
         # Native input size for fixed-size checkpoints; ignored for NaFlex.
         self.input_size = int(getattr(vision_cfg, "image_size", 0) or 0)
 
@@ -167,13 +188,13 @@ class MaSC:
             the subject was found and removed (`prompt_stripped`), the
             `stripper` used and, for spaCy, its pipeline (`stripper_model`).
         """
-        ref_patches, ref_fg, _ = self._encode_image(ref_image, ref_mask)
-        out_patches, out_fg, _ = self._encode_image(out_image, out_mask)
+        ref = self._encode_image(ref_image, ref_mask)
+        out = self._encode_image(out_image, out_mask)
 
-        cp, cp_extras = self._concept_preservation(ref_patches, ref_fg, out_patches)
+        cp, cp_extras = self._concept_preservation(ref, out)
 
         text_prompt, strip_extras = self._pf_prompt(prompt, object_name)
-        pf, pf_extras = self._prompt_following(out_image, out_mask, text_prompt)
+        pf, pf_extras = self._prompt_following(out, text_prompt)
 
         return MaSCResult(
             cp=cp,
@@ -200,76 +221,51 @@ class MaSC:
 
     # --------------- vision encoding ---------------
 
-    def _encode_image(
-        self, image: Image.Image, fg_mask: np.ndarray
-    ) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int]]:
-        """Return (patch_tokens [N, D], fg_weights [N] in [0, 1], (Hp, Wp))."""
+    def _encode_image(self, image: Image.Image, fg_mask: np.ndarray) -> _Encoding:
+        """One vision-tower forward; the image processor resizes (and, for
+        NaFlex, patchifies) the image exactly as the trained pooler expects."""
+        kwargs = dict(images=[image.convert("RGB")], return_tensors="pt")
         if self.is_naflex:
-            return self._encode_image_naflex(image, fg_mask)
-        return self._encode_image_fixed(image, fg_mask)
-
-    def _encode_image_fixed(
-        self, image: Image.Image, fg_mask: np.ndarray
-    ) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int]]:
-        size = self.input_size
-        if size <= 0 or size % self.patch_size != 0:
-            raise ValueError(
-                f"Bad input_size={size} for patch_size={self.patch_size}"
-            )
-        img = image.convert("RGB").resize((size, size), Image.BILINEAR)
-        t = TF.to_tensor(img)
-        t = TF.normalize(t, mean=self.image_mean, std=self.image_std)
-        pixel_values = t.unsqueeze(0).to(self.device)
-
-        out = self.model.vision_model(pixel_values=pixel_values)
-        patches = out.last_hidden_state[0]  # [N, D] — SigLIP2 has no CLS
-
-        Hp = Wp = size // self.patch_size
-        if patches.shape[0] != Hp * Wp:
-            raise RuntimeError(
-                f"Unexpected token count {patches.shape[0]} vs Hp*Wp={Hp * Wp}"
-            )
-        fg = self._downsample_mask(fg_mask, Hp, Wp).flatten().to(patches.dtype)
-        return patches, fg, (Hp, Wp)
-
-    def _encode_image_naflex(
-        self, image: Image.Image, fg_mask: np.ndarray
-    ) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int]]:
-        inputs = self.processor.image_processor(
-            images=image.convert("RGB"),
-            max_num_patches=self.naflex_max_patches,
-            return_tensors="pt",
-        )
+            kwargs["max_num_patches"] = self.naflex_max_patches
+        inputs = self.processor.image_processor(**kwargs)
         pixel_values = inputs["pixel_values"].to(self.device)
-        pixel_attention_mask = inputs["pixel_attention_mask"].to(self.device)
-        spatial_shapes = inputs["spatial_shapes"].to(self.device)
-        Hp, Wp = (int(x) for x in inputs["spatial_shapes"][0].tolist())
 
-        out = self.model.vision_model(
-            pixel_values=pixel_values,
-            pixel_attention_mask=pixel_attention_mask,
-            spatial_shapes=spatial_shapes,
-        )
-        valid = pixel_attention_mask[0] > 0
-        patches = out.last_hidden_state[0][valid]  # [Hp*Wp, D]
-        if patches.shape[0] != Hp * Wp:
-            raise RuntimeError(
-                f"Valid token count {patches.shape[0]} vs Hp*Wp={Hp * Wp}"
+        if self.is_naflex:
+            pixel_attention_mask = inputs["pixel_attention_mask"].to(self.device)
+            vis_out = self.model.vision_model(
+                pixel_values=pixel_values,
+                pixel_attention_mask=pixel_attention_mask,
+                spatial_shapes=inputs["spatial_shapes"].to(self.device),
             )
-        fg = self._downsample_mask(fg_mask, Hp, Wp).flatten().to(patches.dtype)
-        return patches, fg, (Hp, Wp)
+            Hp, Wp = (int(x) for x in inputs["spatial_shapes"][0].tolist())
+            valid = pixel_attention_mask[0] > 0
+        else:
+            vis_out = self.model.vision_model(pixel_values=pixel_values)
+            if self.input_size <= 0 or self.input_size % self.patch_size != 0:
+                raise ValueError(
+                    f"Bad input_size={self.input_size} for patch_size={self.patch_size}"
+                )
+            Hp = Wp = self.input_size // self.patch_size
+            n = vis_out.last_hidden_state.shape[1]
+            valid = torch.ones(n, dtype=torch.bool, device=self.device)
+
+        n_valid = int(valid.sum())
+        if n_valid != Hp * Wp:
+            raise RuntimeError(f"Valid token count {n_valid} vs Hp*Wp={Hp * Wp}")
+        fg = self._downsample_mask(fg_mask, Hp, Wp).flatten()
+        return _Encoding(hidden=vis_out.last_hidden_state, valid=valid, grid=(Hp, Wp), fg=fg)
 
     # --------------- CP head ---------------
 
-    def _concept_preservation(
-        self, ref_patches: torch.Tensor, ref_fg: torch.Tensor, out_patches: torch.Tensor
-    ) -> tuple[float, dict]:
+    def _concept_preservation(self, ref: _Encoding, out: _Encoding) -> tuple[float, dict]:
+        ref_patches = ref.patches
         ref_unit = F.normalize(ref_patches, dim=-1)
-        out_unit = F.normalize(out_patches, dim=-1)
+        out_unit = F.normalize(out.patches, dim=-1)
         # Per-ref-patch max cosine to any out patch.
         sims = ref_unit @ out_unit.T  # [N_ref, N_out]
         nn_cos_per_ref = sims.max(dim=-1).values  # [N_ref]
 
+        ref_fg = ref.fg.to(ref_patches.dtype)
         ref_in_fg = ref_fg > self.fg_threshold
         n_fg = int(ref_in_fg.sum())
         if n_fg == 0:
@@ -287,61 +283,21 @@ class MaSC:
 
     # --------------- PF head ---------------
 
-    def _prompt_following(
-        self, out_image: Image.Image, out_mask: np.ndarray, prompt: str
-    ) -> tuple[float, dict]:
+    def _prompt_following(self, out: _Encoding, prompt: str) -> tuple[float, dict]:
         """BG-pooled image cosine vs pooled text embedding.
 
-        We can't directly reuse the patch tensor from `_encode_image`
-        because the vision pooler needs the full padded sequence
-        (NaFlex) or the unprojected last hidden state with its layout
-        intact. We rerun the vision tower here to get both the pooler
-        head and a layout that the head expects. The text encode is one
-        forward; the vision recompute is the same forward already done
-        once for CP, so on a real eval loop you can cache image
-        features per-image upstream and amortize.
+        Reuses the output's vision-tower hidden state from the CP branch: the
+        trained attention pooler runs on it with a `key_padding_mask` that
+        hides padded slots and foreground patches.
         """
-        # Re-run vision with the full processor output so we have the
-        # padded tensor structure the pooler head was trained on.
-        kwargs = dict(images=[out_image.convert("RGB")], return_tensors="pt")
-        if self.is_naflex:
-            kwargs["max_num_patches"] = self.naflex_max_patches
-        try:
-            inputs = self.processor.image_processor(**kwargs)
-        except TypeError:
-            kwargs.pop("max_num_patches", None)
-            inputs = self.processor.image_processor(**kwargs)
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
-        if self.is_naflex:
-            vis_out = self.model.vision_model(
-                pixel_values=inputs["pixel_values"],
-                pixel_attention_mask=inputs["pixel_attention_mask"],
-                spatial_shapes=inputs["spatial_shapes"],
-            )
-            Hp, Wp = (int(x) for x in inputs["spatial_shapes"][0].tolist())
-            valid_mask = inputs["pixel_attention_mask"][0].bool()
-        else:
-            vis_out = self.model.vision_model(pixel_values=inputs["pixel_values"])
-            N = vis_out.last_hidden_state.shape[1]
-            Hp = Wp = int(round(N**0.5))
-            if Hp * Wp != N:
-                raise RuntimeError(f"Non-square fixed grid (n={N}).")
-            valid_mask = torch.ones(N, dtype=torch.bool, device=self.device)
-
-        patches = vis_out.last_hidden_state  # [1, N_max, D]
-        N_max = patches.shape[1]
-
-        fg_real = self._downsample_mask(out_mask, Hp, Wp).flatten() > self.fg_threshold
-        valid_idx = valid_mask.nonzero(as_tuple=False).squeeze(-1)
-        if valid_idx.numel() != Hp * Wp:
-            raise RuntimeError(
-                f"valid count {valid_idx.numel()} != Hp*Wp {Hp * Wp}"
-            )
+        Hp, Wp = out.grid
+        n_max = out.hidden.shape[1]
+        fg_real = out.fg >= self.fg_threshold
+        valid_idx = out.valid.nonzero(as_tuple=False).squeeze(-1)
 
         # key_padding_mask: True = exclude. Exclude all padded slots, then
         # additionally exclude foreground patches → BG-only attention pool.
-        kpm = torch.ones(N_max, dtype=torch.bool, device=self.device)
+        kpm = torch.ones(n_max, dtype=torch.bool, device=self.device)
         kpm[valid_idx] = fg_real  # True (excluded) where fg
         n_fg = int(fg_real.sum())
         n_bg = int((~kpm).sum())
@@ -352,18 +308,14 @@ class MaSC:
                 "pf_n_bg_pooled": 0,
             }
 
-        pooled_img = self._pool_with_kpm(
-            self.model.vision_model.head, patches, kpm
-        )  # [1, D]
+        pooled_img = self._pool_with_kpm(self.model.vision_model.head, out.hidden, kpm)  # [1, D]
 
-        text_inputs = self.tokenizer(
-            [prompt],
-            padding="max_length",
-            return_tensors="pt",
-            truncation=True,
-        )
-        text_inputs = {k: v.to(self.device) for k, v in text_inputs.items()}
-        txt_out = self.model.text_model(input_ids=text_inputs["input_ids"])
+        # The processor pads to the text tower's trained length (64 tokens
+        # for SigLIP2); the pooled text embedding depends on that padding.
+        input_ids = self.processor(text=[prompt], padding="max_length", return_tensors="pt")[
+            "input_ids"
+        ].to(self.device)
+        txt_out = self.model.text_model(input_ids=input_ids)
         pooled_txt = txt_out.pooler_output  # [1, D]
 
         img_n = F.normalize(pooled_img, dim=-1)
