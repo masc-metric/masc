@@ -13,7 +13,7 @@ Concept-Driven Generation".
 from .metric import MaSC, MaSCResult
 from .text import STRIPPERS, SpacySubjectStripper, strip_subject_from_prompt
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     "STRIPPERS",
     "MaSC",
